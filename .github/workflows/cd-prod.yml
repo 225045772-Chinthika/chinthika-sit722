@@ -1,5 +1,4 @@
 name: CD Stage 3 (Production Deploy on PR Merge)
-#test
 
 on:
   workflow_run:
@@ -29,7 +28,7 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      # Make sure prod AKS can pull from your ACR (safe to run every time)
+      # Make sure prod AKS can pull from ACR
       - name: Grant ACR pull to AKS (prod)
         run: |
           az aks update -g "$PROD_RG" -n "$PROD_AKS" --attach-acr "$ACR_NAME"
@@ -69,7 +68,6 @@ jobs:
       - name: Apply Kubernetes manifests
         run: kubectl apply -f k8s/ -n "$NAMESPACE"
 
-      # NOTE: handle frontend specially (repo is 'frontend', not 'frontend-service')
       - name: Set images to the merge commit (auto-detect; handle frontend)
         run: |
           set -euo pipefail

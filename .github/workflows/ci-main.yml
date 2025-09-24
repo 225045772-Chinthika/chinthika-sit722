@@ -1,4 +1,4 @@
-# .github/workflows/ci-main.yml  (full job for clarity)
+# .github/workflows/ci-main.yml
 name: CI Main
 
 on:
