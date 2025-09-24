@@ -1,0 +1,199 @@
+name: CD Stage 3 (Production Deploy on PR Merge)
+#test
+
+on:
+  workflow_run:
+    workflows: ["CI Main"]
+    branches: [main]
+    types: [completed]
+
+concurrency:
+  group: prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      ACR_NAME: ${{ secrets.ACR_NAME }}
+      PROD_RG:  ${{ secrets.PROD_RG }}
+      PROD_AKS: ${{ secrets.PROD_AKS }}
+      NAMESPACE: sit722
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # Make sure prod AKS can pull from your ACR (safe to run every time)
+      - name: Grant ACR pull to AKS (prod)
+        run: |
+          az aks update -g "$PROD_RG" -n "$PROD_AKS" --attach-acr "$ACR_NAME"
+
+      - name: Get AKS credentials (prod)
+        run: |
+          az aks get-credentials -g "$PROD_RG" -n "$PROD_AKS" --overwrite-existing
+
+      - name: Wait for CI images to arrive in ACR
+        env:
+          ACR_NAME:  ${{ secrets.ACR_NAME }}
+          HEAD_SHA:  ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          for repo in product-service order-service customer-service frontend; do
+            echo "Waiting for $repo:$HEAD_SHA in ACR $ACR_NAME..."
+            found=false
+            for i in {1..30}; do
+              if az acr repository show-tags -n "$ACR_NAME" \
+                   --repository "$repo" \
+                   --query "contains(@, '$HEAD_SHA')" -o tsv | grep -q true; then
+                echo "Found $repo:$HEAD_SHA"
+                found=true
+                break
+              fi
+              sleep 10
+            done
+            if [ "$found" != true ]; then
+              echo "::error::Tag $repo:$HEAD_SHA not found in ACR"
+              exit 1
+            fi
+          done
+
+      - name: Ensure namespace exists
+        run: kubectl create namespace "$NAMESPACE" || true
+       
+      - name: Apply Kubernetes manifests
+        run: kubectl apply -f k8s/ -n "$NAMESPACE"
+
+      # NOTE: handle frontend specially (repo is 'frontend', not 'frontend-service')
+      - name: Set images to the merge commit (auto-detect; handle frontend)
+        run: |
+          set -euo pipefail
+          ACR="${ACR_NAME}.azurecr.io"
+
+          for d in $(kubectl get deploy -n "$NAMESPACE" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+            cname=$(kubectl get deploy/$d -n "$NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].name}')
+            if [ "$cname" = "frontend" ]; then
+              repo="${ACR}/frontend:${HEAD_SHA}"
+            else
+              base="${cname%-service}"
+              repo="${ACR}/${base}-service:${HEAD_SHA}"
+            fi
+            echo "Setting $d container=$cname -> $repo"
+            kubectl set image deploy/$d $cname=$repo -n "$NAMESPACE" --record
+          done
+
+      - name: Verify images are the merge commit
+        run: |
+          set -euo pipefail
+          ACR="${ACR_NAME}.azurecr.io"
+          for d in $(kubectl get deploy -n "$NAMESPACE" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+            cname=$(kubectl get deploy/$d -n "$NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].name}')
+            base="${cname%-service}"
+            if [ "$base" = "frontend" ]; then
+              expected="${ACR}/frontend:${HEAD_SHA}"
+            else
+              expected="${ACR}/${base}-service:${HEAD_SHA}"
+            fi
+            img=$(kubectl get deploy/$d -n "$NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].image}')
+            echo "$d -> $img (expected $expected)"
+            test "$img" = "$expected"
+          done
+
+      - name: Wait for rollouts (best-effort)
+        continue-on-error: true
+        run: |
+          for d in $(kubectl get deploy -n "$NAMESPACE" -o name); do
+            echo "Waiting for $d"
+            kubectl rollout status "$d" -n "$NAMESPACE" --timeout=600s || true
+          done
+
+      - name: Wait for service endpoints (backends)
+        run: |
+          set -e
+          N="${NAMESPACE:-sit722}"
+          for s in product-service order-service; do
+            echo "Waiting for endpoints on $s ..."
+            for i in {1..60}; do
+              EP=$(kubectl -n "$N" get ep "$s" -o jsonpath='{.subsets[*].addresses[*].ip}' || true)
+              if [ -n "$EP" ]; then
+                echo "$s endpoints: $EP"
+                break
+              fi
+              echo "  still waiting..."
+              sleep 5
+            done
+            # fail if still empty after waiting
+            EP=$(kubectl -n "$N" get ep "$s" -o jsonpath='{.subsets[*].addresses[*].ip}' || true)
+            [ -n "$EP" ] || { echo "::error::$s has no endpoints"; exit 1; }
+          done
+
+      - name: Smoke test (inside the cluster)
+        run: |
+          set -e
+          N="${NAMESPACE:-sit722}"
+
+          # resolve ClusterIPs (avoids DNS lookups in pod)
+          PSVC=$(kubectl -n "$N" get svc product-service  -o jsonpath='{.spec.clusterIP}')
+          OSVC=$(kubectl -n "$N" get svc order-service    -o jsonpath='{.spec.clusterIP}')
+          # CSVC=$(kubectl -n "$N" get svc customer-service -o jsonpath='{.spec.clusterIP}')
+          cat <<YAML | kubectl -n "$N" apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: prod-smoke
+          spec:
+            backoffLimit: 0
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: curl
+                  image: curlimages/curl:8.5.0
+                  command: ["sh","-lc"]
+                  args:
+                    - |
+                      set -e
+                      echo ">>> trying http://$PSVC:8000/"
+                      for i in \$(seq 1 30); do
+                        if curl -fsS --max-time 5 "http://$PSVC:8000/"; then break; fi
+                        echo "(retry \$i)"; sleep 2
+                      done
+                      echo ">>> trying http://$OSVC:8001/"
+                      for i in \$(seq 1 30); do
+                        if curl -fsS --max-time 5 "http://$OSVC:8001/"; then break; fi
+                        echo "(retry \$i)"; sleep 2
+                      done
+                      # echo ">>> trying http://$CSVC:8002/"
+                      # for i in \$(seq 1 30); do
+                      #   if curl -fsS --max-time 5 "http://$CSVC:8002/"; then break; fi
+                      #   echo "(retry \$i)"; sleep 2
+                      # done
+          YAML
+
+          # Wait up to 5 minutes and print logs
+          kubectl -n "$N" wait --for=condition=complete job/prod-smoke --timeout=300s
+          echo "----- Smoke test output -----"
+          kubectl -n "$N" logs job/prod-smoke
+          kubectl -n "$N" delete job prod-smoke --ignore-not-found
+
+      - name: Quick diagnostics (non-blocking)
+        continue-on-error: true
+        run: |
+          kubectl get deploy -n "$NAMESPACE" -o wide || true
+          kubectl get pods   -n "$NAMESPACE" -o wide || true
+          kubectl get svc    -n "$NAMESPACE" -o wide || true
+
+      - name: Show public URLs (nice to have)
+        run: |
+          for s in product-service order-service; do
+            ip=$(kubectl get svc $s -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+            port=$(kubectl get svc $s -n "$NAMESPACE" -o jsonpath='{.spec.ports[0].port}')
+            echo "$s => http://$ip:$port/"
+          done
+          ipf=$(kubectl get svc frontend -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          echo "frontend => http://$ipf/"
