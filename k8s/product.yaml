@@ -13,49 +13,37 @@ spec:
     spec:
       containers:
       - name: product-service
-        image: ${ACR_NAME}.azurecr.io/product-service:latest
-        imagePullPolicy: Always
-        ports:
-          - containerPort: 8000
+        image: sit722prodacr.azurecr.io/product-service:latest
+        imagePullPolicy: IfNotPresent
+        ports: [{ containerPort: 8000 }]
         env:
-          - name: PORT
-            value: "8000"
-
-          - name: AZURE_STORAGE_ACCOUNT_NAME
-            valueFrom: { configMapKeyRef: { name: app-config, key: AZURE_STORAGE_ACCOUNT_NAME } }
-          - name: AZURE_STORAGE_CONTAINER
-            valueFrom: { configMapKeyRef: { name: app-config, key: AZURE_STORAGE_CONTAINER } }
-          - name: AZURE_STORAGE_ACCOUNT_KEY
-            valueFrom: { secretKeyRef: { name: app-secrets, key: AZURE_STORAGE_ACCOUNT_KEY } }
-
-          - name: POSTGRES_HOST
-            value: postgres
-          - name: POSTGRES_PORT
-            value: "5432"
-          - name: POSTGRES_DB
-            valueFrom: { secretKeyRef: { name: pg-secret, key: POSTGRES_DB } }
-          - name: POSTGRES_USER
-            valueFrom: { secretKeyRef: { name: pg-secret, key: POSTGRES_USER } }
-          - name: POSTGRES_PASSWORD
-            valueFrom: { secretKeyRef: { name: pg-secret, key: POSTGRES_PASSWORD } }
-          - name: DATABASE_URL
-            valueFrom: { secretKeyRef: { name: pg-url, key: url } }
-
-        readinessProbe:
-          httpGet:
-            path: /health
-            port: 8000
-          initialDelaySeconds: 10
-          periodSeconds: 10
-          failureThreshold: 6
-
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 8000
-          initialDelaySeconds: 20
-          periodSeconds: 10
-          failureThreshold: 6
+        - name: AZURE_STORAGE_ACCOUNT_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: app-config
+              key: AZURE_STORAGE_ACCOUNT_NAME
+        - name: AZURE_STORAGE_CONTAINER
+          valueFrom:
+            configMapKeyRef:
+              name: app-config
+              key: AZURE_STORAGE_CONTAINER
+        - name: AZURE_STORAGE_ACCOUNT_KEY
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: AZURE_STORAGE_ACCOUNT_KEY
+        - name: POSTGRES_HOST
+          value: postgres
+        - name: POSTGRES_PORT
+          value: "5432"
+        - name: POSTGRES_DB
+          valueFrom: { secretKeyRef: { name: pg-secret, key: POSTGRES_DB } }
+        - name: POSTGRES_USER
+          valueFrom: { secretKeyRef: { name: pg-secret, key: POSTGRES_USER } }
+        - name: POSTGRES_PASSWORD
+          valueFrom: { secretKeyRef: { name: pg-secret, key: POSTGRES_PASSWORD } }    
+        - name: DATABASE_URL
+          valueFrom: { secretKeyRef: { name: pg-url, key: url } }    
 ---
 apiVersion: v1
 kind: Service
