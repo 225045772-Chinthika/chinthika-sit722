@@ -1,0 +1,28 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: postgres-initjob
+  namespace: sit722
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: init
+          image: postgres:16-alpine
+          env:
+            - name: PGHOST
+              value: postgres
+            - name: PGUSER
+              valueFrom: { secretKeyRef: { name: pg-secret, key: POSTGRES_USER } }
+            - name: PGPASSWORD
+              valueFrom: { secretKeyRef: { name: pg-secret, key: POSTGRES_PASSWORD } }
+          command: ["sh","-lc"]
+          args:
+            - |
+              echo "Waiting for postgres..."
+              until pg_isready -h "$PGHOST" -p 5432 -U "$PGUSER"; do sleep 3; done
+              psql -h "$PGHOST" -U "$PGUSER" -c "CREATE DATABASE products;"   || true
+              psql -h "$PGHOST" -U "$PGUSER" -c "CREATE DATABASE orders;"     || true
+              psql -h "$PGHOST" -U "$PGUSER" -c "CREATE DATABASE customers;"  || true

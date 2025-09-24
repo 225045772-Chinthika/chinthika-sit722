@@ -1,0 +1,18 @@
+version: "3.9"
+services:
+  product:
+    build: ./backend/product-service
+    ports: ["8000:8000"]
+    environment:
+      - AZURE_STORAGE_ACCOUNT_NAME=sit722storageprod
+      - AZURE_STORAGE_CONTAINER=product-images
+      - AZURE_STORAGE_ACCOUNT_KEY=REPLACE_WITH_LOCAL_DEV_KEY
+  order:
+    build: ./backend/order-service
+    ports: ["8001:8000"]
+  customer:
+    build: ./backend/customer-service
+    ports: ["8002:8000"]
+  frontend:
+    build: ./frontend
+    ports: ["3000:80"]
